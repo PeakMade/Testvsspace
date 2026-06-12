@@ -1,0 +1,16 @@
+{
+  "entrata": {
+    "username": "your_entrata_username",
+    "password": "your_entrata_password",
+    "base_url": "https://yourdomain.entrata.com/api/v1"
+  },
+  "notes": {
+    "lease_statuses": {
+      "1": "Pending - Application submitted, not yet approved",
+      "2": "Approved",
+      "3": "Current",
+      "4": "Notice",
+      "5": "Move Out"
+    }
+  }
+}
