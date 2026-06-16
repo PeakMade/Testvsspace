@@ -2,7 +2,7 @@
 Flask Web App for Entrata Lease Reports
 Interactive app to select academic years and lease status types
 """
-from flask import Flask, render_template, request, jsonify, send_file, Response
+from flask import Flask, render_template, request, jsonify, send_file, Response, make_response
 import os
 import requests
 import pandas as pd
@@ -134,6 +134,7 @@ def _query_all_leases_paginated(headers, property_id, date_from, date_to, status
     all_ids = set()
     page_no = 1
     per_page = 500
+    total_fetched = 0
     
     while True:
         params = {
@@ -153,66 +154,111 @@ def _query_all_leases_paginated(headers, property_id, date_from, date_to, status
         
         try:
             resp = requests.post(LEASES_URL, headers=headers, json=payload, timeout=30)
-            data = resp.json()
             
-            if 'error' in data.get('response', {}):
-                print(f"    ⚠️  API error on page {page_no}")
+            if resp.status_code != 200:
+                print(f"    ⚠️  HTTP {resp.status_code} on page {page_no}")
                 break
             
-            result = data.get('response', {}).get('result', {})
+            data = resp.json()
+            
+            # Check for API-level errors
+            response_obj = data.get('response', {})
+            if 'error' in response_obj:
+                error_msg = response_obj.get('error', {})
+                print(f"    ⚠️  API error on page {page_no}: {error_msg}")
+                break
+            
+            result = response_obj.get('result', {})
             leases = _extract_leases_from_result(result)
             
-            if not leases or len(leases) == 0:
-                # No more leases
+            # Count leases on this page
+            page_lease_count = len(leases) if leases else 0
+            
+            if page_lease_count == 0:
+                # No leases on this page - we're done
+                if page_no == 1:
+                    print(f"    No leases found for status {status_ids}")
                 break
             
             # Extract IDs and add to set
             page_ids = [str(l.get('LeaseId') or l.get('leaseId') or l.get('Id') or l.get('id') or '') 
                        for l in leases if (l.get('LeaseId') or l.get('leaseId') or l.get('Id') or l.get('id'))]
-            all_ids.update(page_ids)
             
-            # If we got fewer than per_page, we've reached the end
-            if len(leases) < per_page:
+            # Filter out empty IDs
+            page_ids = [pid for pid in page_ids if pid]
+            
+            before_count = len(all_ids)
+            all_ids.update(page_ids)
+            new_ids_added = len(all_ids) - before_count
+            total_fetched += page_lease_count
+            
+            # Enhanced logging
+            if page_no == 1:
+                print(f"    Page {page_no}: {page_lease_count} leases, {new_ids_added} unique IDs")
+            else:
+                print(f"    Page {page_no}: {page_lease_count} leases, {new_ids_added} new unique IDs (total unique: {len(all_ids)})")
+            
+            # Check if we should continue
+            if page_lease_count < per_page:
+                # Got fewer than requested, we've reached the end
+                if page_no > 1:
+                    print(f"    ✓ Pagination complete: fetched {total_fetched} total lease records across {page_no} pages → {len(all_ids)} unique lease IDs")
                 break
+            else:
+                # Got full page, there might be more
+                print(f"    → Fetching page {page_no + 1}...")
             
             # Move to next page
             page_no += 1
             
-            # Safety check
+            # Safety check to prevent infinite loops
             if page_no > 100:
-                print(f"    ⚠️  Safety limit: stopped after 100 pages")
+                print(f"    ⚠️  Safety limit: stopped after 100 pages (50,000 records). Total unique IDs: {len(all_ids)}")
                 break
                 
+        except requests.exceptions.Timeout:
+            print(f"    ⚠️  Timeout on page {page_no}")
+            break
         except Exception as e:
             print(f"    ⚠️  Exception on page {page_no}: {e}")
+            import traceback
+            traceback.print_exc()
             break
     
     return all_ids
 
 
-def get_leases_for_property(property_id, property_name, academic_years, status_ids):
-    """Get count of leases for specified academic years and statuses."""
+def get_leases_for_property_by_status(property_id, property_name, academic_years, status_ids_list):
+    """Get count of leases for specified academic years by each status.
+    Returns a dictionary with counts for each status."""
     headers = {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
         'X-Api-Key': API_KEY
     }
     
-    total_ids = set()
+    status_counts = {}
     
-    for year in academic_years:
-        start_date = date_type(year, 8, 1)  # August 1
-        end_date = date_type(year + 1, 7, 31)  # July 31 next year
+    # Query each status separately
+    for status_id in status_ids_list:
+        total_ids = set()
         
-        year_ids = _query_all_leases_paginated(
-            headers, property_id,
-            start_date,
-            end_date,
-            status_ids
-        )
-        total_ids.update(year_ids)
+        for year in academic_years:
+            start_date = date_type(year, 8, 1)  # August 1
+            end_date = date_type(year + 1, 7, 31)  # July 31 next year
+            
+            year_ids = _query_all_leases_paginated(
+                headers, property_id,
+                start_date,
+                end_date,
+                status_id  # Query single status
+            )
+            total_ids.update(year_ids)
+        
+        status_name = LEASE_STATUSES[status_id]
+        status_counts[status_name] = len(total_ids)
     
-    return len(total_ids)
+    return status_counts
 
 
 @app.route('/')
@@ -224,10 +270,17 @@ def index():
     
     years = list(range(current_year - 2, current_year + 6))
     
-    return render_template('index.html', 
+    response = make_response(render_template('index.html', 
                          years=years, 
                          statuses=LEASE_STATUSES,
-                         current_year=current_year)
+                         current_year=current_year))
+    
+    # Prevent caching
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    
+    return response
 
 
 @app.route('/run_report', methods=['POST'])
@@ -271,8 +324,8 @@ def process_report(task_id, selected_year, selected_statuses):
         
         selected_years = [int(selected_year)]
         
-        # Convert status IDs to comma-separated string
-        status_ids = ','.join(selected_statuses)
+        # Store selected status IDs as list for separate queries
+        status_ids_list = selected_statuses
         status_names = ', '.join([LEASE_STATUSES[s] for s in selected_statuses])
         year_display = f"{selected_years[0]}-{selected_years[0] + 1}"
         
@@ -310,16 +363,29 @@ def process_report(task_id, selected_year, selected_statuses):
             print(f"[{index}/{len(properties)}] Processing: {prop_name} (ID: {prop_id})")
             start_time = datetime.now()
             
-            count = get_leases_for_property(prop_id, prop_name, selected_years, status_ids)
+            status_counts = get_leases_for_property_by_status(prop_id, prop_name, selected_years, status_ids_list)
+            
+            # Build result with separate columns for each status
+            result = {
+                'Property ID': str(prop_id),
+                'Property Name': prop_name
+            }
+            
+            # Add column for each selected status
+            total = 0
+            for status_id in status_ids_list:
+                status_name = LEASE_STATUSES[status_id]
+                count = status_counts.get(status_name, 0)
+                result[status_name] = count
+                total += count
+                print(f"  ✓ {status_name}: {count}")
+            
+            result['Total'] = total
             
             elapsed = (datetime.now() - start_time).total_seconds()
-            print(f"  ✓ Found {count} leases ({elapsed:.2f} seconds)")
+            print(f"  ✓ Total: {total} leases ({elapsed:.2f} seconds)")
             
-            return {
-                'Property ID': str(prop_id),
-                'Property Name': prop_name,
-                'Lease Count': count
-            }
+            return result
         
         # Process properties in parallel
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -346,11 +412,11 @@ def process_report(task_id, selected_year, selected_statuses):
                 except Exception as e:
                     print(f"  ❌ Error processing {prop.get('MarketingName', 'Unknown')}: {str(e)}")
     
-        # Sort by count descending
-        results.sort(key=lambda x: x['Lease Count'], reverse=True)
+        # Sort by total count descending
+        results.sort(key=lambda x: x['Total'], reverse=True)
         
-        # Calculate total
-        total_count = sum(r['Lease Count'] for r in results)
+        # Calculate totals
+        total_count = sum(r['Total'] for r in results)
         
         total_elapsed = (datetime.now() - report_start_time).total_seconds()
         
@@ -358,19 +424,60 @@ def process_report(task_id, selected_year, selected_statuses):
         print(f"REPORT COMPLETE")
         print(f"{'='*80}")
         print(f"Total Properties: {len(results)}")
-        print(f"Total Leases: {total_count}")
+        
+        # Print totals by status
+        print("\nLeases by Status:")
+        for status_id in status_ids_list:
+            status_name = LEASE_STATUSES[status_id]
+            status_total = sum(r.get(status_name, 0) for r in results)
+            print(f"  {status_name}: {status_total}")
+        
+        print(f"\nTotal Leases (All Selected Statuses): {total_count}")
         print(f"Total Time: {total_elapsed:.2f} seconds ({total_elapsed/60:.1f} minutes)")
         print(f"{'='*80}\n")
         
         # Create DataFrame
         df = pd.DataFrame(results)
         
-        # Add totals row
-        totals_row = pd.DataFrame({
+        # Filter out status columns where all values are 0
+        status_columns_to_keep = []
+        status_columns_removed = []
+        
+        for status_id in status_ids_list:
+            status_name = LEASE_STATUSES[status_id]
+            if status_name in df.columns:
+                # Check if any property has non-zero value for this status
+                if df[status_name].sum() > 0:
+                    status_columns_to_keep.append(status_name)
+                else:
+                    status_columns_removed.append(status_name)
+        
+        if status_columns_removed:
+            print(f"\n📊 Filtering out zero-only columns: {', '.join(status_columns_removed)}")
+            print(f"✓ Keeping columns with data: {', '.join(status_columns_to_keep)}")
+        
+        # Keep only columns with data + Property ID, Property Name, Total
+        columns_to_keep = ['Property ID', 'Property Name'] + status_columns_to_keep + ['Total']
+        df = df[columns_to_keep]
+        
+        # Recalculate Total based on remaining status columns only
+        for idx in df.index:
+            row_total = sum(df.loc[idx, status_name] for status_name in status_columns_to_keep if status_name in df.columns)
+            df.loc[idx, 'Total'] = row_total
+        
+        # Add totals row with only kept status columns
+        totals_row_data = {
             'Property ID': [''],
-            'Property Name': ['TOTAL'],
-            'Lease Count': [total_count]
-        })
+            'Property Name': ['TOTAL']
+        }
+        for status_name in status_columns_to_keep:
+            totals_row_data[status_name] = [sum(r.get(status_name, 0) for r in results)]
+        
+        # Recalculate total_count from kept columns only
+        total_count = sum(totals_row_data[status_name][0] for status_name in status_columns_to_keep)
+        totals_row_data['Total'] = [total_count]
+        
+        totals_row = pd.DataFrame(totals_row_data)
         df_with_totals = pd.concat([df, totals_row], ignore_index=True)
         
         # Create Excel file in memory

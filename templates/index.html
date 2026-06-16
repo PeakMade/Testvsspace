@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Lease Stats</title>
     
     <!-- Bootstrap CSS -->
@@ -234,8 +237,10 @@
         
         .btn-primary:disabled {
             background: #cbd5e0;
+            color: #a0aec0;
             cursor: not-allowed;
             transform: none;
+            box-shadow: none;
         }
         
         .btn-secondary {
@@ -245,6 +250,59 @@
         
         .btn-secondary:hover {
             background: #cbd5e0;
+        }
+        
+        /* Modal Styles */
+        .modal-backdrop {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            z-index: 1000;
+            opacity: 1 !important;
+        }
+        
+        .modal-backdrop.show {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 1 !important;
+        }
+        
+        .modal-content {
+            background: #FFFFFF !important;
+            background-color: #FFFFFF !important;
+            opacity: 1 !important;
+            border-radius: 12px;
+            padding: 40px;
+            max-width: 600px;
+            width: 90%;
+            box-shadow: 0 20px 60px rgb(0, 0, 0);
+            animation: none !important;
+            border: 2px solid #333333;
+            position: relative;
+            z-index: 1001;
+            filter: none !important;
+            backdrop-filter: none !important;
+            -webkit-backdrop-filter: none !important;
+            mix-blend-mode: normal !important;
+            isolation: isolate;
+        }
+        
+        .modal-content * {
+            opacity: 1 !important;
+        }
+        
+        @keyframes modalSlideIn {
+            from {
+                transform: translateY(-20px);
+            }
+            to {
+                transform: translateY(0);
+            }
         }
         
         .results-container {
@@ -327,14 +385,32 @@
         }
         
         .loading {
-            display: none;
             text-align: center;
-            padding: 40px;
-            color: #667eea;
+            padding: 0;
+            opacity: 1 !important;
+            background: rgb(255, 255, 255) !important;
         }
         
-        .loading.show {
-            display: block;
+        .loading h3 {
+            color: #000000 !important;
+            font-size: 24px;
+            margin-bottom: 10px;
+            font-weight: 700;
+            opacity: 1 !important;
+        }
+        
+        .loading p {
+            color: #000000 !important;
+            font-size: 15px;
+            margin-bottom: 20px;
+            font-weight: 500;
+            opacity: 1 !important;
+        }
+        
+        #loadingMessage {
+            color: #000000 !important;
+            font-weight: 600;
+            opacity: 1 !important;
         }
         
         .spinner {
@@ -362,12 +438,12 @@
         
         .progress-bar {
             width: 100%;
-            height: 30px;
+            height: 35px;
             background: #e2e8f0;
-            border-radius: 15px;
+            border-radius: 17px;
             overflow: hidden;
             margin-bottom: 15px;
-            box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: inset 0 2px 4px rgb(0,0,0);
         }
         
         .progress-fill {
@@ -380,23 +456,27 @@
             color: white;
             font-weight: 600;
             font-size: 14px;
+            min-width: 0;
         }
         
         .progress-info {
             text-align: center;
-            color: #2d3748;
         }
         
         .progress-info .current-property {
             font-size: 16px;
-            font-weight: 600;
-            color: #667eea;
-            margin-bottom: 5px;
+            font-weight: 700;
+            color: #000000 !important;
+            margin-bottom: 8px;
+            word-break: break-word;
+            opacity: 1 !important;
         }
         
         .progress-info .progress-status {
             font-size: 14px;
-            color: #718096;
+            color: #000000 !important;
+            font-weight: 500;
+            opacity: 1 !important;
         }
         
         .error {
@@ -432,6 +512,7 @@
             border-radius: 8px;
             font-size: 14px;
             margin-top: 12px;
+            max-width: fit-content;
         }
         
         .count-badge {
@@ -532,18 +613,24 @@
             <div class="error" id="errorMessage"></div>
             <div class="success" id="successMessage"></div>
         </div>
-        
-        <div class="loading" id="loading">
-            <div class="spinner"></div>
-            <p id="loadingMessage">Generating Excel report... This may take a few minutes.</p>
-            
-            <div class="progress-container" id="progressContainer">
-                <div class="progress-bar">
-                    <div class="progress-fill" id="progressFill">0%</div>
-                </div>
-                <div class="progress-info">
-                    <div class="current-property" id="currentProperty">Initializing...</div>
-                    <div class="progress-status" id="progressStatus">Starting...</div>
+    </div>
+    
+    <!-- Modal for Progress -->
+    <div class="modal-backdrop" id="progressModal">
+        <div class="modal-content">
+            <div class="loading" id="loading">
+                <h3>Generating Report</h3>
+                <div class="spinner"></div>
+                <p id="loadingMessage">Generating Excel report... This may take a few minutes.</p>
+                
+                <div class="progress-container" id="progressContainer">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill">0%</div>
+                    </div>
+                    <div class="progress-info">
+                        <div class="current-property" id="currentProperty">Initializing...</div>
+                        <div class="progress-status" id="progressStatus">Starting...</div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -650,11 +737,17 @@
         }
         
         function showLoading() {
-            document.getElementById('loading').classList.add('show');
+            document.getElementById('progressModal').classList.add('show');
+            document.getElementById('runButton').disabled = true;
         }
         
         function hideLoading() {
-            document.getElementById('loading').classList.remove('show');
+            document.getElementById('progressModal').classList.remove('show');
+            document.getElementById('runButton').disabled = false;
+            // Reset progress display
+            document.getElementById('progressContainer').classList.remove('show');
+            document.getElementById('progressFill').style.width = '0%';
+            document.getElementById('progressFill').textContent = '0%';
         }
         
         function showError(message) {
