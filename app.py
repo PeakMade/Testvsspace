@@ -42,9 +42,8 @@ LEASE_STATUSES = {
     '7': 'Cancelled'
 }
 
-_ENTRATA_CAP = 500  # Entrata's hard per-request record limit
-
-# Thread-safe lease counting
+# Note: Entrata API supports pagination via page_no/per_page parameters
+# No longer need bisection workaround
 
 
 def get_all_properties():
@@ -129,57 +128,66 @@ def _extract_leases_from_result(result):
     return leases or []
 
 
-def _query_ids_in_range(headers, property_id, date_from, date_to, status_ids):
-    """Query lease IDs for a property within a moveInDate range.
-    Returns a list of ID strings, or None on API error."""
-    params = {
-        "propertyId": str(property_id),
-        "leaseStatusTypeIds": status_ids,  # Now accepts multiple statuses
-        "moveInDateFrom": date_from.strftime("%m/%d/%Y"),
-        "moveInDateTo": date_to.strftime("%m/%d/%Y"),
-    }
-    payload = {
-        "auth": {"type": "apikey"},
-        "requestId": str(int(datetime.now().timestamp() * 1000)),
-        "method": {"name": "getLeases", "version": "r2", "params": params}
-    }
-    try:
-        resp = requests.post(LEASES_URL, headers=headers, json=payload, timeout=30)
-        data = resp.json()
-        if 'error' in data.get('response', {}):
-            return None
-        result = data.get('response', {}).get('result', {})
-        leases = _extract_leases_from_result(result)
-        return [str(l.get('LeaseId') or l.get('leaseId') or l.get('Id') or l.get('id') or '') 
-                for l in leases if (l.get('LeaseId') or l.get('leaseId') or l.get('Id') or l.get('id'))]
-    except Exception:
-        return None
-
-
-def _collect_all_ids(headers, property_id, date_from, date_to, status_ids, depth=0):
-    """Recursively collect all unique lease IDs, bisecting the date range
-    whenever the API returns exactly 500 records (the hard cap)."""
+def _query_all_leases_paginated(headers, property_id, date_from, date_to, status_ids):
+    """Query all lease IDs for a property using native API pagination.
+    Returns a set of unique ID strings."""
+    all_ids = set()
+    page_no = 1
+    per_page = 500
     
-    ids = _query_ids_in_range(headers, property_id, date_from, date_to, status_ids)
-    if ids is None:
-        print(f"    ⚠️  API error for range {date_from} to {date_to}")
-        return set()
+    while True:
+        params = {
+            "propertyId": str(property_id),
+            "leaseStatusTypeIds": status_ids,
+            "moveInDateFrom": date_from.strftime("%m/%d/%Y"),
+            "moveInDateTo": date_to.strftime("%m/%d/%Y"),
+            "page_no": page_no,
+            "per_page": per_page
+        }
+        
+        payload = {
+            "auth": {"type": "apikey"},
+            "requestId": str(int(datetime.now().timestamp() * 1000)),
+            "method": {"name": "getLeases", "version": "r2", "params": params}
+        }
+        
+        try:
+            resp = requests.post(LEASES_URL, headers=headers, json=payload, timeout=30)
+            data = resp.json()
+            
+            if 'error' in data.get('response', {}):
+                print(f"    ⚠️  API error on page {page_no}")
+                break
+            
+            result = data.get('response', {}).get('result', {})
+            leases = _extract_leases_from_result(result)
+            
+            if not leases or len(leases) == 0:
+                # No more leases
+                break
+            
+            # Extract IDs and add to set
+            page_ids = [str(l.get('LeaseId') or l.get('leaseId') or l.get('Id') or l.get('id') or '') 
+                       for l in leases if (l.get('LeaseId') or l.get('leaseId') or l.get('Id') or l.get('id'))]
+            all_ids.update(page_ids)
+            
+            # If we got fewer than per_page, we've reached the end
+            if len(leases) < per_page:
+                break
+            
+            # Move to next page
+            page_no += 1
+            
+            # Safety check
+            if page_no > 100:
+                print(f"    ⚠️  Safety limit: stopped after 100 pages")
+                break
+                
+        except Exception as e:
+            print(f"    ⚠️  Exception on page {page_no}: {e}")
+            break
     
-    if len(ids) < _ENTRATA_CAP:
-        return set(ids)
-    
-    # Hit the cap; log and bisect
-    print(f"    ⚠️  Hit 500-record cap for range {date_from} to {date_to} - bisecting...")
-    
-    if date_from >= date_to:
-        print(f"    ⚠️  Single-day range still at cap!")
-        return set(ids)
-    
-    mid = date_from + (date_to - date_from) // 2
-    left  = _collect_all_ids(headers, property_id, date_from, mid, status_ids, depth + 1)
-    right = _collect_all_ids(headers, property_id, mid + timedelta(days=1), date_to, status_ids, depth + 1)
-    combined = left | right
-    return combined
+    return all_ids
 
 
 def get_leases_for_property(property_id, property_name, academic_years, status_ids):
@@ -196,7 +204,7 @@ def get_leases_for_property(property_id, property_name, academic_years, status_i
         start_date = date_type(year, 8, 1)  # August 1
         end_date = date_type(year + 1, 7, 31)  # July 31 next year
         
-        year_ids = _collect_all_ids(
+        year_ids = _query_all_leases_paginated(
             headers, property_id,
             start_date,
             end_date,
