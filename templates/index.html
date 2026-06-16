@@ -130,6 +130,7 @@
         
         .form-section select {
             width: 100%;
+            max-width: 400px;
             padding: 12px;
             border: 2px solid #e2e8f0;
             border-radius: 8px;
@@ -172,7 +173,8 @@
             background: #edf2f7;
         }
         
-        .checkbox-item input[type="checkbox"] {
+        .checkbox-item input[type="checkbox"],
+        .checkbox-item input[type="radio"] {
             width: 18px;
             height: 18px;
             margin-right: 10px;
@@ -201,6 +203,7 @@
             display: flex;
             gap: 12px;
             margin-top: 20px;
+            max-width: 400px;
         }
         
         button {
@@ -220,6 +223,7 @@
             background: #667eea;
             color: white;
             flex: 1;
+            min-width: 150px;
         }
         
         .btn-primary:hover {
@@ -347,6 +351,54 @@
             to { transform: rotate(360deg); }
         }
         
+        .progress-container {
+            margin-top: 20px;
+            display: none;
+        }
+        
+        .progress-container.show {
+            display: block;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #e2e8f0;
+            border-radius: 15px;
+            overflow: hidden;
+            margin-bottom: 15px;
+            box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        
+        .progress-info {
+            text-align: center;
+            color: #2d3748;
+        }
+        
+        .progress-info .current-property {
+            font-size: 16px;
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 5px;
+        }
+        
+        .progress-info .progress-status {
+            font-size: 14px;
+            color: #718096;
+        }
+        
         .error {
             background: #fed7d7;
             color: #9b2c2c;
@@ -357,6 +409,19 @@
         }
         
         .error.show {
+            display: block;
+        }
+        
+        .success {
+            background: #c6f6d5;
+            color: #22543d;
+            padding: 16px;
+            border-radius: 8px;
+            margin-top: 20px;
+            display: none;
+        }
+        
+        .success.show {
             display: block;
         }
         
@@ -377,6 +442,28 @@
             font-weight: 600;
             background: #667eea;
             color: white;
+        }
+        
+        .download-btn {
+            background: #48bb78;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 20px;
+        }
+        
+        .download-btn:hover {
+            background: #38a169;
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(72, 187, 120, 0.4);
         }
     </style>
 </head>
@@ -443,34 +530,29 @@
             </form>
             
             <div class="error" id="errorMessage"></div>
+            <div class="success" id="successMessage"></div>
         </div>
         
         <div class="loading" id="loading">
             <div class="spinner"></div>
-            <p>Generating report... This may take a few minutes.</p>
-        </div>
-        
-        <div class="results-container" id="results">
-            <h2 style="margin-bottom: 20px; color: #2d3748;">Report Results</h2>
+            <p id="loadingMessage">Generating Excel report... This may take a few minutes.</p>
             
-            <div class="summary-cards" id="summaryCards"></div>
-            
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Property Name</th>
-                            <th>Property ID</th>
-                            <th style="text-align: right;">Lease Count</th>
-                        </tr>
-                    </thead>
-                    <tbody id="resultsTable"></tbody>
-                </table>
+            <div class="progress-container" id="progressContainer">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill">0%</div>
+                </div>
+                <div class="progress-info">
+                    <div class="current-property" id="currentProperty">Initializing...</div>
+                    <div class="progress-status" id="progressStatus">Starting...</div>
+                </div>
             </div>
         </div>
     </div>
     
     <script>
+        let progressInterval = null;
+        let currentTaskId = null;
+        
         document.getElementById('reportForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             
@@ -484,69 +566,87 @@
             }
             
             hideError();
+            hideSuccess();
             showLoading();
-            hideResults();
             
             try {
+                // Start the report generation
                 const response = await fetch('/run_report', {
                     method: 'POST',
                     headers: {
-                        'Content-Type': 'application/json',
+                        'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({ year, statuses })
                 });
                 
-                const data = await response.json();
-                
-                if (data.error) {
-                    showError(data.error);
-                } else {
-                    displayResults(data);
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Failed to start report generation');
                 }
+                
+                const data = await response.json();
+                currentTaskId = data.task_id;
+                
+                // Show progress container
+                document.getElementById('progressContainer').classList.add('show');
+                
+                // Start polling for progress
+                startProgressPolling(currentTaskId);
+                
             } catch (error) {
-                showError('An error occurred while generating the report: ' + error.message);
-            } finally {
                 hideLoading();
+                showError(error.message);
             }
         });
         
-        function displayResults(data) {
-            const { results, summary } = data;
+        function startProgressPolling(taskId) {
+            if (progressInterval) {
+                clearInterval(progressInterval);
+            }
             
-            // Display summary cards
-            const summaryCards = document.getElementById('summaryCards');
-            summaryCards.innerHTML = `
-                <div class="summary-card">
-                    <div class="label">Total Leases</div>
-                    <div class="value">${summary.total_count.toLocaleString()}</div>
-                </div>
-                <div class="summary-card">
-                    <div class="label">Total Properties</div>
-                    <div class="value">${summary.total_properties}</div>
-                </div>
-                <div class="summary-card">
-                    <div class="label">Average per Property</div>
-                    <div class="value">${summary.avg_count}</div>
-                </div>
-                <div class="summary-card">
-                    <div class="label">Properties with Leases</div>
-                    <div class="value">${summary.properties_with_leases}</div>
-                </div>
-            `;
+            progressInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/progress/${taskId}`);
+                    if (!response.ok) {
+                        throw new Error('Failed to fetch progress');
+                    }
+                    
+                    const progress = await response.json();
+                    updateProgressUI(progress);
+                    
+                    if (progress.status === 'complete') {
+                        clearInterval(progressInterval);
+                        hideLoading();
+                        showSuccess(`Report complete! Total: ${progress.total_count} leases across ${progress.total_properties} properties.`);
+                        
+                        // Download the report
+                        window.location.href = `/download_report/${taskId}`;
+                        
+                    } else if (progress.status === 'error') {
+                        clearInterval(progressInterval);
+                        hideLoading();
+                        showError(progress.message || 'An error occurred');
+                    }
+                } catch (error) {
+                    clearInterval(progressInterval);
+                    hideLoading();
+                    showError('Failed to fetch progress: ' + error.message);
+                }
+            }, 500); // Poll every 500ms for smooth updates
+        }
+        
+        function updateProgressUI(progress) {
+            const percentage = progress.total > 0 
+                ? Math.round((progress.current / progress.total) * 100) 
+                : 0;
             
-            // Display results table
-            const tbody = document.getElementById('resultsTable');
-            tbody.innerHTML = results.map(r => `
-                <tr>
-                    <td><strong>${r.property_name}</strong></td>
-                    <td>${r.property_id}</td>
-                    <td style="text-align: right;">
-                        <span class="count-badge">${r.count.toLocaleString()}</span>
-                    </td>
-                </tr>
-            `).join('');
+            const progressFill = document.getElementById('progressFill');
+            progressFill.style.width = percentage + '%';
+            progressFill.textContent = percentage + '%';
             
-            showResults();
+            document.getElementById('currentProperty').textContent = progress.current_property || 'Processing...';
+            document.getElementById('progressStatus').textContent = 
+                `Property ${progress.current} of ${progress.total} - ${progress.message || ''}`;
         }
         
         function showLoading() {
@@ -557,32 +657,45 @@
             document.getElementById('loading').classList.remove('show');
         }
         
-        function showResults() {
-            document.getElementById('results').classList.add('show');
-        }
-        
-        function hideResults() {
-            document.getElementById('results').classList.remove('show');
-        }
-        
         function showError(message) {
             const errorDiv = document.getElementById('errorMessage');
             errorDiv.textContent = message;
             errorDiv.classList.add('show');
+            hideSuccess();
         }
         
         function hideError() {
             document.getElementById('errorMessage').classList.remove('show');
         }
         
+        function showSuccess(message) {
+            const successDiv = document.getElementById('successMessage');
+            successDiv.textContent = message;
+            successDiv.classList.add('show');
+            hideError();
+            
+            // Auto-hide after 5 seconds
+            setTimeout(() => {
+                hideSuccess();
+            }, 5000);
+        }
+        
+        function hideSuccess() {
+            document.getElementById('successMessage').classList.remove('show');
+        }
+        
         function resetForm() {
             document.getElementById('reportForm').reset();
-            // Re-check current year and pending status
+            // Re-select current year and pending status
             const currentYear = {{ current_year }};
-            document.getElementById('year_' + currentYear).checked = true;
+            document.getElementById('yearSelect').value = currentYear;
             document.getElementById('status_1').checked = true;
-            hideResults();
             hideError();
+            hideSuccess();
+        }
+        
+        function downloadExcel() {
+            window.location.href = '/download_excel';
         }
     </script>
 </body>

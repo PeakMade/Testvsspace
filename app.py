@@ -2,13 +2,17 @@
 Flask Web App for Entrata Lease Reports
 Interactive app to select academic years and lease status types
 """
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_file, Response
 import os
 import requests
 import pandas as pd
 from datetime import datetime, timedelta, date as date_type
 from dotenv import load_dotenv
 import json
+import io
+import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv()
 
@@ -18,6 +22,14 @@ API_KEY = os.getenv('ENTRATA_API_KEY')
 ORG = os.getenv('ENTRATA_ORG', 'peakmade')
 PROPERTIES_URL = f"https://apis.entrata.com/ext/orgs/{ORG}/v1/properties"
 LEASES_URL = f"https://apis.entrata.com/ext/orgs/{ORG}/v1/leases"
+
+# Progress tracking
+progress_data = {}
+report_results = {}
+progress_lock = threading.Lock()
+
+# Parallel processing settings
+MAX_WORKERS = 10  # Number of concurrent API requests
 
 # Lease status types
 LEASE_STATUSES = {
@@ -31,6 +43,8 @@ LEASE_STATUSES = {
 }
 
 _ENTRATA_CAP = 500  # Entrata's hard per-request record limit
+
+# Thread-safe lease counting
 
 
 def get_all_properties():
@@ -148,12 +162,17 @@ def _collect_all_ids(headers, property_id, date_from, date_to, status_ids, depth
     
     ids = _query_ids_in_range(headers, property_id, date_from, date_to, status_ids)
     if ids is None:
+        print(f"    ⚠️  API error for range {date_from} to {date_to}")
         return set()
     
     if len(ids) < _ENTRATA_CAP:
         return set(ids)
     
+    # Hit the cap; log and bisect
+    print(f"    ⚠️  Hit 500-record cap for range {date_from} to {date_to} - bisecting...")
+    
     if date_from >= date_to:
+        print(f"    ⚠️  Single-day range still at cap!")
         return set(ids)
     
     mid = date_from + (date_to - date_from) // 2
@@ -205,7 +224,7 @@ def index():
 
 @app.route('/run_report', methods=['POST'])
 def run_report():
-    """Run the report with selected parameters"""
+    """Run the report with selected parameters and return task ID"""
     data = request.get_json()
     selected_year = data.get('year')
     selected_statuses = data.get('statuses', [])
@@ -213,54 +232,218 @@ def run_report():
     if not selected_year or not selected_statuses:
         return jsonify({'error': 'Please select a year and at least one status'}), 400
     
-    selected_years = [int(selected_year)]
+    # Generate unique task ID
+    task_id = str(uuid.uuid4())
     
-    # Convert status IDs to comma-separated string
-    status_ids = ','.join(selected_statuses)
-    status_names = ', '.join([LEASE_STATUSES[s] for s in selected_statuses])
-    year_display = f"{selected_years[0]}-{selected_years[0] + 1}"
+    # Initialize progress
+    progress_data[task_id] = {
+        'status': 'starting',
+        'current': 0,
+        'total': 0,
+        'current_property': 'Initializing...',
+        'message': 'Starting report generation'
+    }
     
-    # Get all properties
-    properties = get_all_properties()
+    # Start background thread to process report
+    thread = threading.Thread(target=process_report, args=(task_id, selected_year, selected_statuses))
+    thread.daemon = True
+    thread.start()
     
-    if not properties:
-        return jsonify({'error': 'Could not retrieve properties'}), 500
-    
-    results = []
-    
-    for prop in properties:
-        prop_id = prop.get('PropertyID')
-        prop_name = prop.get('MarketingName', f"Property {prop_id}")
-        
-        count = get_leases_for_property(prop_id, prop_name, selected_years, status_ids)
-        
-        results.append({
-            'property_id': str(prop_id),
-            'property_name': prop_name,
-            'count': count
-        })
-    
-    # Sort by count descending
-    results.sort(key=lambda x: x['count'], reverse=True)
-    
-    # Calculate summary
-    total_count = sum(r['count'] for r in results)
-    avg_count = total_count / len(results) if results else 0
-    properties_with_leases = sum(1 for r in results if r['count'] > 0)
-    
-    return jsonify({
-        'success': True,
-        'results': results,
-        'summary': {
-            'total_properties': len(results),
-            'total_count': total_count,
-            'avg_count': round(avg_count, 1),
-            'properties_with_leases': properties_with_leases,
-            'selected_year': year_display,
-            'selected_statuses': status_names
-        }
-    })
+    return jsonify({'task_id': task_id})
 
+
+def process_report(task_id, selected_year, selected_statuses):
+    """Process the report in background and track progress"""
+    try:
+        report_start_time = datetime.now()
+        print(f"\n{'#'*80}")
+        print(f"NEW REPORT REQUEST - {report_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Task ID: {task_id}")
+        print(f"{'#'*80}")
+        
+        selected_years = [int(selected_year)]
+        
+        # Convert status IDs to comma-separated string
+        status_ids = ','.join(selected_statuses)
+        status_names = ', '.join([LEASE_STATUSES[s] for s in selected_statuses])
+        year_display = f"{selected_years[0]}-{selected_years[0] + 1}"
+        
+        # Get all properties
+        progress_data[task_id]['message'] = 'Fetching properties from Entrata API...'
+        print(f"\nFetching properties from Entrata API...")
+        prop_start = datetime.now()
+        properties = get_all_properties()
+        prop_elapsed = (datetime.now() - prop_start).total_seconds()
+        print(f"✓ Retrieved {len(properties)} properties ({prop_elapsed:.2f} seconds)")
+        
+        if not properties:
+            progress_data[task_id]['status'] = 'error'
+            progress_data[task_id]['message'] = 'Could not retrieve properties'
+            return
+        
+        # Update progress with total
+        progress_data[task_id]['total'] = len(properties)
+        progress_data[task_id]['status'] = 'processing'
+        
+        results = []
+        completed_count = [0]  # Using list to allow modification in nested function
+        
+        print(f"\n{'='*80}")
+        print(f"PROCESSING {len(properties)} PROPERTIES (Using {MAX_WORKERS} parallel workers)")
+        print(f"Academic Year: {year_display}")
+        print(f"Status Types: {status_names}")
+        print(f"{'='*80}\n")
+        
+        def process_single_property(prop, index):
+            """Process a single property and return results"""
+            prop_id = prop.get('PropertyID')
+            prop_name = prop.get('MarketingName', f"Property {prop_id}")
+            
+            print(f"[{index}/{len(properties)}] Processing: {prop_name} (ID: {prop_id})")
+            start_time = datetime.now()
+            
+            count = get_leases_for_property(prop_id, prop_name, selected_years, status_ids)
+            
+            elapsed = (datetime.now() - start_time).total_seconds()
+            print(f"  ✓ Found {count} leases ({elapsed:.2f} seconds)")
+            
+            return {
+                'Property ID': str(prop_id),
+                'Property Name': prop_name,
+                'Lease Count': count
+            }
+        
+        # Process properties in parallel
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # Submit all tasks
+            future_to_prop = {
+                executor.submit(process_single_property, prop, idx): (prop, idx) 
+                for idx, prop in enumerate(properties, 1)
+            }
+            
+            # Process completed tasks
+            for future in as_completed(future_to_prop):
+                prop, idx = future_to_prop[future]
+                try:
+                    result = future.result()
+                    results.append(result)
+                    
+                    # Update progress (thread-safe)
+                    with progress_lock:
+                        completed_count[0] += 1
+                        progress_data[task_id]['current'] = completed_count[0]
+                        progress_data[task_id]['current_property'] = result['Property Name']
+                        progress_data[task_id]['message'] = f"Processing property {completed_count[0]} of {len(properties)}"
+                        
+                except Exception as e:
+                    print(f"  ❌ Error processing {prop.get('MarketingName', 'Unknown')}: {str(e)}")
+    
+        # Sort by count descending
+        results.sort(key=lambda x: x['Lease Count'], reverse=True)
+        
+        # Calculate total
+        total_count = sum(r['Lease Count'] for r in results)
+        
+        total_elapsed = (datetime.now() - report_start_time).total_seconds()
+        
+        print(f"\n{'='*80}")
+        print(f"REPORT COMPLETE")
+        print(f"{'='*80}")
+        print(f"Total Properties: {len(results)}")
+        print(f"Total Leases: {total_count}")
+        print(f"Total Time: {total_elapsed:.2f} seconds ({total_elapsed/60:.1f} minutes)")
+        print(f"{'='*80}\n")
+        
+        # Create DataFrame
+        df = pd.DataFrame(results)
+        
+        # Add totals row
+        totals_row = pd.DataFrame({
+            'Property ID': [''],
+            'Property Name': ['TOTAL'],
+            'Lease Count': [total_count]
+        })
+        df_with_totals = pd.concat([df, totals_row], ignore_index=True)
+        
+        # Create Excel file in memory
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_with_totals.to_excel(writer, sheet_name='Lease Report', index=False)
+            
+            # Format the worksheet
+            worksheet = writer.sheets['Lease Report']
+            
+            # Bold headers
+            for cell in worksheet[1]:
+                cell.font = cell.font.copy(bold=True)
+            
+            # Bold totals row
+            last_row = len(df_with_totals) + 1
+            for cell in worksheet[last_row]:
+                cell.font = cell.font.copy(bold=True)
+            
+            # Auto-adjust column widths
+            for column in worksheet.columns:
+                max_length = 0
+                column_letter = column[0].column_letter
+                for cell in column:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                worksheet.column_dimensions[column_letter].width = adjusted_width
+        
+        output.seek(0)
+        
+        # Generate filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"lease_report_{year_display.replace('-', '_')}_{timestamp}.xlsx"
+        
+        # Store results for download
+        report_results[task_id] = {
+            'file': output,
+            'filename': filename,
+            'total_count': total_count,
+            'total_properties': len(results)
+        }
+        
+        # Update progress to complete
+        progress_data[task_id]['status'] = 'complete'
+        progress_data[task_id]['message'] = 'Report generation complete!'
+        progress_data[task_id]['total_count'] = total_count
+        progress_data[task_id]['total_properties'] = len(results)
+        
+    except Exception as e:
+        print(f"\n❌ Error processing report: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        progress_data[task_id]['status'] = 'error'
+        progress_data[task_id]['message'] = f'Error: {str(e)}'
+
+
+@app.route('/progress/<task_id>')
+def get_progress(task_id):
+    """Get progress for a specific task"""
+    if task_id not in progress_data:
+        return jsonify({'error': 'Task not found'}), 404
+    return jsonify(progress_data[task_id])
+
+
+@app.route('/download_report/<task_id>')
+def download_report(task_id):
+    """Download the completed report"""
+    if task_id not in report_results:
+        return jsonify({'error': 'Report not found'}), 404
+    
+    result = report_results[task_id]
+    return send_file(
+        result['file'],
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name=result['filename']
+    )
 
 if __name__ == '__main__':
     if not API_KEY:
