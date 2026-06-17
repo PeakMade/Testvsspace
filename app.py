@@ -499,7 +499,7 @@ def process_report(task_id, selected_year, selected_statuses):
             worksheet = writer.sheets['Lease Report']
             
             # Add title row with academic year
-            worksheet['B1'] = f"Title of Academic Year {year_display}"
+            worksheet['B1'] = year_display
             title_cell = worksheet['B1']
             title_cell.font = title_cell.font.copy(bold=True)
             title_cell.alignment = openpyxl.styles.Alignment(horizontal='left', vertical='center')
