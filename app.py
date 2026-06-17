@@ -14,6 +14,7 @@ import uuid
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import calendar
+import openpyxl.styles
 
 load_dotenv()
 
@@ -81,19 +82,26 @@ def get_all_properties():
         
         # Filter to only active residential properties (excluding Canadian)
         filtered_properties = []
-        exclude_keywords = ['retail', 'reit', 'llc', 'corporate', 'shuttle', 'condominium', 'assoc', 'master', 'ucc', 'university center', 'gateway', 'connect']
+        exclude_keywords = ['retail', 'reit', 'llc', 'corporate', 'shuttle', 'condominium', 'assoc', 'master', 'ucc', 'university center', 'gateway', 'connect', 'member', ' lp', ' pe']
         exclude_countries = ['CAN']
         
         for prop in properties:
             prop_name = prop.get('MarketingName', '')
             is_disabled = prop.get('IsDisabled', 0)
             
+            # Skip disabled properties
             if is_disabled == 1:
                 continue
             
+            # Skip if no valid property name
+            if not prop_name or prop_name.strip() == '':
+                continue
+            
+            # Skip properties starting with 'z' or 'Z' (archived)
             if prop_name.startswith('z') or prop_name.startswith('Z'):
                 continue
             
+            # Skip if name contains excluded keywords (case-insensitive)
             if any(keyword in prop_name.lower() for keyword in exclude_keywords):
                 continue
             
@@ -477,17 +485,23 @@ def process_report(task_id, selected_year, selected_statuses):
         # Create Excel file in memory
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_with_totals.to_excel(writer, sheet_name='Lease Report', index=False)
+            df_with_totals.to_excel(writer, sheet_name='Lease Report', index=False, startrow=1)
             
             # Format the worksheet
             worksheet = writer.sheets['Lease Report']
             
-            # Bold headers
-            for cell in worksheet[1]:
+            # Add title row with academic year
+            worksheet['B1'] = f"Title of Academic Year {year_display}"
+            title_cell = worksheet['B1']
+            title_cell.font = title_cell.font.copy(bold=True, size=14)
+            title_cell.fill = openpyxl.styles.PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+            
+            # Bold headers (now in row 2)
+            for cell in worksheet[2]:
                 cell.font = cell.font.copy(bold=True)
             
             # Bold totals row
-            last_row = len(df_with_totals) + 1
+            last_row = len(df_with_totals) + 2  # +2 because of title row
             for cell in worksheet[last_row]:
                 cell.font = cell.font.copy(bold=True)
             
