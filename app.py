@@ -88,9 +88,14 @@ def get_all_properties():
         for prop in properties:
             prop_name = prop.get('MarketingName', '')
             is_disabled = prop.get('IsDisabled', 0)
+            prop_type = prop.get('Type', '')
             
             # Skip disabled properties
             if is_disabled == 1:
+                continue
+            
+            # Skip Corporate type properties (vendors)
+            if prop_type == 'Corporate':
                 continue
             
             # Skip if no valid property name
@@ -108,6 +113,18 @@ def get_all_properties():
             address = prop.get('Address', {})
             country = address.get('Country', '')
             if country in exclude_countries:
+                continue
+            
+            # Skip placeholder properties that never went live (no operational indicators)
+            has_operational_data = (
+                prop.get('YearBuilt') or 
+                prop.get('PropertyHours') or 
+                prop.get('webSite') or
+                prop.get('LongDescription') or
+                prop.get('ShortDescription') or
+                prop.get('LeaseTerms')
+            )
+            if not has_operational_data:
                 continue
             
             filtered_properties.append(prop)
@@ -485,7 +502,6 @@ def process_report(task_id, selected_year, selected_statuses):
             worksheet['B1'] = f"Title of Academic Year {year_display}"
             title_cell = worksheet['B1']
             title_cell.font = title_cell.font.copy(bold=True)
-            title_cell.fill = openpyxl.styles.PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
             title_cell.alignment = openpyxl.styles.Alignment(horizontal='left', vertical='center')
             
             # Bold headers (now in row 2)
