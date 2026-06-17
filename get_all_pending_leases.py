@@ -122,7 +122,7 @@ def _query_ids_in_range(headers, property_id, date_from, date_to):
     Returns a list of ID strings, or None on API error."""
     params = {
         "propertyId": str(property_id),
-        "leaseStatusTypeIds": "125",
+        "leaseStatusTypeIds": "1",
         "moveInDateFrom": date_from.strftime("%m/%d/%Y"),
         "moveInDateTo": date_to.strftime("%m/%d/%Y"),
     }

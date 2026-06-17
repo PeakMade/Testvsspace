@@ -1,6 +1,6 @@
 """
-Entrata API - Pending Lease Report
-Retrieves pending lease counts (status = 1) for all properties
+Entrata API - Lease Report by Status
+Retrieves lease counts by status (Pending, Denied, Approved, Current, Notice, Past, Cancelled) for all properties
 """
 
 import requests
@@ -315,10 +315,10 @@ class EntrataAPI:
         
         return all_leases
     
-    def get_pending_lease_counts(self, properties: List[Dict] = None, academic_year: int = None) -> pd.DataFrame:
+    def get_lease_counts_by_status(self, properties: List[Dict] = None, academic_year: int = None) -> pd.DataFrame:
         """
-        Get pending lease counts for all properties
-        Returns a DataFrame with Property ID, Property Name, and Pending Lease Count
+        Get lease counts by status for all properties
+        Returns a DataFrame with Property ID, Property Name, and counts for each status
         
         Args:
             properties: Optional list of properties. If not provided, will fetch from API.
@@ -331,9 +331,20 @@ class EntrataAPI:
             print("❌ No properties found or API error occurred")
             return pd.DataFrame()
         
+        # Status types
+        statuses = {
+            1: 'Pending',
+            2: 'Denied',
+            3: 'Approved',
+            4: 'Current',
+            5: 'Notice',
+            6: 'Past',
+            7: 'Cancelled'
+        }
+        
         print(f"✓ Found {len(properties)} properties")
         print("\n" + "="*80)
-        print("Fetching pending leases for each property...")
+        print("Fetching leases for each property by status...")
         print("="*80)
         
         results = []
@@ -355,17 +366,24 @@ class EntrataAPI:
             print(f"\n[{idx}/{len(properties)}] Processing: {property_name} (ID: {property_id})")
             
             try:
-                # Get pending leases (status = 1) for this property
-                pending_leases = self.get_leases(property_id=str(property_id), lease_status=1, academic_year=academic_year)
-                pending_count = len(pending_leases) if pending_leases else 0
-                
-                results.append({
+                row_data = {
                     'Property ID': str(property_id),
-                    'Property Name': property_name,
-                    'Pending Lease Count': pending_count
-                })
+                    'Property Name': property_name
+                }
                 
-                print(f"  ✓ {pending_count} pending lease(s)")
+                # Get leases for each status
+                total = 0
+                for status_id, status_name in statuses.items():
+                    leases = self.get_leases(property_id=str(property_id), lease_status=status_id, academic_year=academic_year)
+                    count = len(leases) if leases else 0
+                    row_data[status_name] = count
+                    total += count
+                    print(f"  ✓ {status_name}: {count}")
+                
+                row_data['Total'] = total
+                results.append(row_data)
+                
+                print(f"  ✓ Total: {total} lease(s)")
                 
             except Exception as e:
                 error_msg = f"Error processing {property_name} (ID: {property_id}): {str(e)}"
@@ -373,19 +391,22 @@ class EntrataAPI:
                 errors.append(error_msg)
                 
                 # Add property with error marker
-                results.append({
+                row_data = {
                     'Property ID': str(property_id),
-                    'Property Name': property_name,
-                    'Pending Lease Count': -1  # -1 indicates error
-                })
+                    'Property Name': property_name
+                }
+                for status_name in statuses.values():
+                    row_data[status_name] = -1  # -1 indicates error
+                row_data['Total'] = -1
+                results.append(row_data)
             
             # Small delay to avoid rate limiting
             time.sleep(0.25)
         
-        # Create DataFrame and sort by pending count (descending - highest to lowest)
+        # Create DataFrame and sort by total count (descending - highest to lowest)
         df = pd.DataFrame(results)
-        if not df.empty:
-            df = df.sort_values('Pending Lease Count', ascending=False)
+        if not df.empty and 'Total' in df.columns:
+            df = df.sort_values('Total', ascending=False)
         
         # Report errors
         if errors:
@@ -468,22 +489,51 @@ def main():
     print(f"GENERATING REPORT FOR ACADEMIC YEAR {year}-{year+1}")
     print("=" * 80)
     
-    df = api.get_pending_lease_counts(properties=properties, academic_year=year)
+    df = api.get_lease_counts_by_status(properties=properties, academic_year=year)
     
     if df.empty:
         print(f"\n❌ No data retrieved for {year}-{year+1}.")
         return
     
     # Filter out errors (-1 values) for summary
-    df_valid = df[df['Pending Lease Count'] >= 0].copy()
-    df_errors = df[df['Pending Lease Count'] < 0].copy()
+    df_valid = df[df['Total'] >= 0].copy()
+    df_errors = df[df['Total'] < 0].copy()
     
-    # Sort by pending lease count (descending)
-    df_valid = df_valid.sort_values('Pending Lease Count', ascending=False)
+    # Filter out status columns where all values are 0 (not relevant for this year)
+    all_status_columns = ['Pending', 'Denied', 'Approved', 'Current', 'Notice', 'Past', 'Cancelled']
+    status_columns_to_keep = []
+    status_columns_removed = []
+    
+    for status in all_status_columns:
+        if status in df_valid.columns:
+            # Check if any property has non-zero value for this status
+            if df_valid[status].sum() > 0:
+                status_columns_to_keep.append(status)
+            else:
+                status_columns_removed.append(status)
+    
+    if status_columns_removed:
+        print(f"\n📊 Filtering out zero-only columns: {', '.join(status_columns_removed)}")
+        print(f"✓ Keeping columns with data: {', '.join(status_columns_to_keep)}")
+    
+    # Keep only columns with data + Property ID, Property Name, Total
+    columns_to_keep = ['Property ID', 'Property Name'] + status_columns_to_keep + ['Total']
+    df_valid = df_valid[columns_to_keep]
+    
+    # Recalculate Total based on remaining status columns only
+    for idx in df_valid.index:
+        row_total = sum(df_valid.loc[idx, status] for status in status_columns_to_keep if status in df_valid.columns)
+        df_valid.loc[idx, 'Total'] = row_total
+    
+    # Update status_columns to only include kept columns for rest of script
+    status_columns = status_columns_to_keep
+    
+    # Sort by total lease count (descending)
+    df_valid = df_valid.sort_values('Total', ascending=False)
     
     # Display results
     print("\n" + "=" * 80)
-    print(f"RESULTS - PENDING LEASE COUNTS BY PROPERTY ({year}-{year+1})")
+    print(f"RESULTS - LEASE COUNTS BY STATUS ({year}-{year+1})")
     print("=" * 80)
     print(df_valid.to_string(index=False))
     
@@ -501,33 +551,46 @@ def main():
     print(f"Properties Successfully Queried: {len(df_valid)}")
     if not df_errors.empty:
         print(f"Properties with Errors: {len(df_errors)}")
-    print(f"\nTotal Pending Leases: {df_valid['Pending Lease Count'].sum()}")
-    print(f"Average Pending Leases per Property: {df_valid['Pending Lease Count'].mean():.1f}")
-    print(f"Properties with Pending Leases: {(df_valid['Pending Lease Count'] > 0).sum()}")
-    print(f"Max Pending Leases (Single Property): {df_valid['Pending Lease Count'].max()}")
+    
+    # Status-specific summaries
+    print("\nLeases by Status:")
+    for status in status_columns:
+        if status in df_valid.columns:
+            total = df_valid[status].sum()
+            print(f"  {status}: {total}")
+    
+    print(f"\nTotal Leases (All Statuses): {df_valid['Total'].sum()}")
+    print(f"Average Leases per Property: {df_valid['Total'].mean():.1f}")
+    print(f"Properties with Leases: {(df_valid['Total'] > 0).sum()}")
+    print(f"Max Leases (Single Property): {df_valid['Total'].max()}")
     
     # Export to Excel
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    excel_file = f"entrata_pending_leases_{year}_{year+1}_{timestamp}.xlsx"
-    csv_file = f"entrata_pending_leases_{year}_{year+1}_{timestamp}.csv"
+    excel_file = f"entrata_lease_report_{year}_{year+1}_{timestamp}.xlsx"
+    csv_file = f"entrata_lease_report_{year}_{year+1}_{timestamp}.csv"
     
     # Clean up old reports for this year before saving new ones
-    cleanup_old_reports(f"entrata_pending_leases_{year}_{year+1}_*.xlsx", keep_count=1)
-    cleanup_old_reports(f"entrata_pending_leases_{year}_{year+1}_*.csv", keep_count=1)
+    cleanup_old_reports(f"entrata_lease_report_{year}_{year+1}_*.xlsx", keep_count=1)
+    cleanup_old_reports(f"entrata_lease_report_{year}_{year+1}_*.csv", keep_count=1)
     
-    # Add totals row to valid data
-    totals_row = pd.DataFrame({
+    # Add totals row to valid data (using only kept status columns)
+    totals_row_data = {
         'Property ID': [''],
-        'Property Name': ['TOTAL'],
-        'Pending Lease Count': [df_valid['Pending Lease Count'].sum()]
-    })
+        'Property Name': ['TOTAL']
+    }
+    for status in status_columns:
+        if status in df_valid.columns:
+            totals_row_data[status] = [df_valid[status].sum()]
+    totals_row_data['Total'] = [df_valid['Total'].sum()]
+    
+    totals_row = pd.DataFrame(totals_row_data)
     df_valid_with_totals = pd.concat([df_valid, totals_row], ignore_index=True)
     
     with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
-        df_valid_with_totals.to_excel(writer, sheet_name='Pending Leases', index=False)
+        df_valid_with_totals.to_excel(writer, sheet_name='Lease Counts', index=False)
         
         # Format the totals row
-        worksheet = writer.sheets['Pending Leases']
+        worksheet = writer.sheets['Lease Counts']
         last_row = len(df_valid_with_totals) + 1  # +1 for header
         for cell in worksheet[last_row]:
             cell.font = cell.font.copy(bold=True)

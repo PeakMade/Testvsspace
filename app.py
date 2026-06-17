@@ -13,6 +13,7 @@ import io
 import uuid
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import calendar
 
 load_dotenv()
 
@@ -42,8 +43,8 @@ LEASE_STATUSES = {
     '7': 'Cancelled'
 }
 
-# Note: Entrata API supports pagination via page_no/per_page parameters
-# No longer need bisection workaround
+# Entrata API has a hard 500-record limit per request
+# We use date-range bisection to bypass this cap
 
 
 def get_all_properties():
@@ -80,7 +81,7 @@ def get_all_properties():
         
         # Filter to only active residential properties (excluding Canadian)
         filtered_properties = []
-        exclude_keywords = ['retail', 'reit', 'llc', 'corporate', 'shuttle', 'condominium', 'assoc', 'master', 'ucc', 'university center', 'gateway']
+        exclude_keywords = ['retail', 'reit', 'llc', 'corporate', 'shuttle', 'condominium', 'assoc', 'master', 'ucc', 'university center', 'gateway', 'connect']
         exclude_countries = ['CAN']
         
         for prop in properties:
@@ -128,108 +129,89 @@ def _extract_leases_from_result(result):
     return leases or []
 
 
-def _query_all_leases_paginated(headers, property_id, date_from, date_to, status_ids):
-    """Query all lease IDs for a property using native API pagination.
-    Returns a set of unique ID strings."""
-    all_ids = set()
-    page_no = 1
-    per_page = 500
-    total_fetched = 0
+_ENTRATA_CAP = 500  # Entrata's hard per-request record limit
+
+
+def _query_ids_in_range(headers, property_id, date_from, date_to, status_ids):
+    """Query lease IDs for a property within a moveInDate range.
+    Returns a list of ID strings, or None on API error."""
+    params = {
+        "propertyId": str(property_id),
+        "leaseStatusTypeIds": status_ids,
+        "moveInDateFrom": date_from.strftime("%m/%d/%Y"),
+        "moveInDateTo": date_to.strftime("%m/%d/%Y"),
+    }
+    payload = {
+        "auth": {"type": "apikey"},
+        "requestId": str(int(datetime.now().timestamp() * 1000)),
+        "method": {"name": "getLeases", "version": "r2", "params": params}
+    }
+    try:
+        resp = requests.post(LEASES_URL, headers=headers, json=payload, timeout=30)
+        data = resp.json()
+        if 'error' in data.get('response', {}):
+            return None
+        result = data.get('response', {}).get('result', {})
+        leases = _extract_leases_from_result(result)
+        return [str(l.get('LeaseId') or l.get('leaseId') or l.get('Id') or l.get('id') or '') 
+                for l in leases if (l.get('LeaseId') or l.get('leaseId') or l.get('Id') or l.get('id'))]
+    except Exception:
+        return None
+
+
+def _collect_all_ids(headers, property_id, date_from, date_to, status_ids, depth=0):
+    """Recursively collect all unique lease IDs, bisecting the date range
+    whenever the API returns exactly 500 records (the hard cap).
+    Continues splitting until every sub-range is below the cap."""
     
-    while True:
-        params = {
-            "propertyId": str(property_id),
-            "leaseStatusTypeIds": status_ids,
-            "moveInDateFrom": date_from.strftime("%m/%d/%Y"),
-            "moveInDateTo": date_to.strftime("%m/%d/%Y"),
-            "page_no": page_no,
-            "per_page": per_page
-        }
-        
-        payload = {
-            "auth": {"type": "apikey"},
-            "requestId": str(int(datetime.now().timestamp() * 1000)),
-            "method": {"name": "getLeases", "version": "r2", "params": params}
-        }
-        
-        try:
-            resp = requests.post(LEASES_URL, headers=headers, json=payload, timeout=30)
-            
-            if resp.status_code != 200:
-                print(f"    ⚠️  HTTP {resp.status_code} on page {page_no}")
-                break
-            
-            data = resp.json()
-            
-            # Check for API-level errors
-            response_obj = data.get('response', {})
-            if 'error' in response_obj:
-                error_msg = response_obj.get('error', {})
-                print(f"    ⚠️  API error on page {page_no}: {error_msg}")
-                break
-            
-            result = response_obj.get('result', {})
-            leases = _extract_leases_from_result(result)
-            
-            # Count leases on this page
-            page_lease_count = len(leases) if leases else 0
-            
-            if page_lease_count == 0:
-                # No leases on this page - we're done
-                if page_no == 1:
-                    print(f"    No leases found for status {status_ids}")
-                break
-            
-            # Extract IDs and add to set
-            page_ids = [str(l.get('LeaseId') or l.get('leaseId') or l.get('Id') or l.get('id') or '') 
-                       for l in leases if (l.get('LeaseId') or l.get('leaseId') or l.get('Id') or l.get('id'))]
-            
-            # Filter out empty IDs
-            page_ids = [pid for pid in page_ids if pid]
-            
-            before_count = len(all_ids)
-            all_ids.update(page_ids)
-            new_ids_added = len(all_ids) - before_count
-            total_fetched += page_lease_count
-            
-            # Enhanced logging
-            if page_no == 1:
-                print(f"    Page {page_no}: {page_lease_count} leases, {new_ids_added} unique IDs")
-            else:
-                print(f"    Page {page_no}: {page_lease_count} leases, {new_ids_added} new unique IDs (total unique: {len(all_ids)})")
-            
-            # Check if we should continue
-            if page_lease_count < per_page:
-                # Got fewer than requested, we've reached the end
-                if page_no > 1:
-                    print(f"    ✓ Pagination complete: fetched {total_fetched} total lease records across {page_no} pages → {len(all_ids)} unique lease IDs")
-                break
-            else:
-                # Got full page, there might be more
-                print(f"    → Fetching page {page_no + 1}...")
-            
-            # Move to next page
-            page_no += 1
-            
-            # Safety check to prevent infinite loops
-            if page_no > 100:
-                print(f"    ⚠️  Safety limit: stopped after 100 pages (50,000 records). Total unique IDs: {len(all_ids)}")
-                break
-                
-        except requests.exceptions.Timeout:
-            print(f"    ⚠️  Timeout on page {page_no}")
-            break
-        except Exception as e:
-            print(f"    ⚠️  Exception on page {page_no}: {e}")
-            import traceback
-            traceback.print_exc()
-            break
+    ids = _query_ids_in_range(headers, property_id, date_from, date_to, status_ids)
+    if ids is None:
+        return set()
+    
+    if len(ids) < _ENTRATA_CAP:
+        # Under the cap — we have all records in this range
+        if depth == 0:
+            print(f"    {len(ids)} leases")
+        return set(ids)
+    
+    # Hit the cap! Log warning and bisect
+    indent = "  " * (depth + 2)
+    print(f"{indent}⚠️  Hit 500-record cap for range {date_from} to {date_to} - bisecting...")
+    
+    if date_from >= date_to:
+        # Single day still hitting the cap - this means data loss!
+        print(f"{indent}🚨 CRITICAL: Single-day range {date_from} STILL at 500 cap!")
+        print(f"{indent}   Property {property_id} has 500+ leases on this ONE DAY")
+        print(f"{indent}   DATA MAY BE INCOMPLETE - consider narrowing filters")
+        return set(ids)
+    
+    # Hit the cap; bisect and take the union of both halves
+    mid = date_from + (date_to - date_from) // 2
+    left  = _collect_all_ids(headers, property_id, date_from, mid, status_ids, depth + 1)
+    right = _collect_all_ids(headers, property_id, mid + timedelta(days=1), date_to, status_ids, depth + 1)
+    combined = left | right
+    
+    if depth == 0:
+        print(f"    ✓ Bisection complete: {len(combined)} unique lease IDs")
+    
+    return combined
+
+
+def _query_all_leases_bisection(headers, property_id, date_from, date_to, status_ids):
+    """Query all lease IDs for a property using date-range bisection to bypass the 500 cap.
+    Returns a set of unique ID strings."""
+    all_ids = _collect_all_ids(headers, property_id, date_from, date_to, status_ids)
+    
+    if len(all_ids) == 0:
+        print(f"    No leases found for status {status_ids}")
     
     return all_ids
 
 
 def get_leases_for_property_by_status(property_id, property_name, academic_years, status_ids_list):
     """Get count of leases for specified academic years by each status.
+    Queries month-by-month upfront to avoid hitting 500 cap.
+    Bisection only triggers as safety net if a single month has 500+ leases.
     Returns a dictionary with counts for each status."""
     headers = {
         'Content-Type': 'application/json',
@@ -244,16 +226,28 @@ def get_leases_for_property_by_status(property_id, property_name, academic_years
         total_ids = set()
         
         for year in academic_years:
-            start_date = date_type(year, 8, 1)  # August 1
-            end_date = date_type(year + 1, 7, 31)  # July 31 next year
+            # Academic year: August (year) to July (year+1)
+            months = [
+                (year, 8), (year, 9), (year, 10), (year, 11), (year, 12),
+                (year + 1, 1), (year + 1, 2), (year + 1, 3), (year + 1, 4),
+                (year + 1, 5), (year + 1, 6), (year + 1, 7)
+            ]
             
-            year_ids = _query_all_leases_paginated(
-                headers, property_id,
-                start_date,
-                end_date,
-                status_id  # Query single status
-            )
-            total_ids.update(year_ids)
+            for month_year, month_num in months:
+                # First day of month
+                month_start = date_type(month_year, month_num, 1)
+                
+                # Last day of month
+                last_day = calendar.monthrange(month_year, month_num)[1]
+                month_end = date_type(month_year, month_num, last_day)
+                
+                month_ids = _query_all_leases_bisection(
+                    headers, property_id,
+                    month_start,
+                    month_end,
+                    status_id
+                )
+                total_ids.update(month_ids)
         
         status_name = LEASE_STATUSES[status_id]
         status_counts[status_name] = len(total_ids)
