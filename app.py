@@ -441,33 +441,24 @@ def process_report(task_id, selected_year, selected_statuses):
         # Create DataFrame
         df = pd.DataFrame(results)
         
-        # Filter out status columns where all values are 0
-        status_columns_to_keep = []
-        status_columns_removed = []
+        # Keep all selected status columns (even if they have 0 leases)
+        status_columns_to_keep = [LEASE_STATUSES[status_id] for status_id in status_ids_list]
         
-        for status_id in status_ids_list:
-            status_name = LEASE_STATUSES[status_id]
-            if status_name in df.columns:
-                # Check if any property has non-zero value for this status
-                if df[status_name].sum() > 0:
-                    status_columns_to_keep.append(status_name)
-                else:
-                    status_columns_removed.append(status_name)
+        # Ensure all status columns exist in dataframe (fill with 0 if missing)
+        for status_name in status_columns_to_keep:
+            if status_name not in df.columns:
+                df[status_name] = 0
         
-        if status_columns_removed:
-            print(f"\n📊 Filtering out zero-only columns: {', '.join(status_columns_removed)}")
-            print(f"✓ Keeping columns with data: {', '.join(status_columns_to_keep)}")
-        
-        # Keep only columns with data + Property ID, Property Name, Total
+        # Keep all columns: Property ID, Property Name, all selected statuses, Total
         columns_to_keep = ['Property ID', 'Property Name'] + status_columns_to_keep + ['Total']
         df = df[columns_to_keep]
         
-        # Recalculate Total based on remaining status columns only
+        # Recalculate Total based on all selected status columns
         for idx in df.index:
-            row_total = sum(df.loc[idx, status_name] for status_name in status_columns_to_keep if status_name in df.columns)
+            row_total = sum(df.loc[idx, status_name] for status_name in status_columns_to_keep)
             df.loc[idx, 'Total'] = row_total
         
-        # Add totals row with only kept status columns
+        # Add totals row with all selected status columns
         totals_row_data = {
             'Property ID': [''],
             'Property Name': ['TOTAL']
@@ -475,7 +466,7 @@ def process_report(task_id, selected_year, selected_statuses):
         for status_name in status_columns_to_keep:
             totals_row_data[status_name] = [sum(r.get(status_name, 0) for r in results)]
         
-        # Recalculate total_count from kept columns only
+        # Calculate total_count from all selected status columns
         total_count = sum(totals_row_data[status_name][0] for status_name in status_columns_to_keep)
         totals_row_data['Total'] = [total_count]
         
@@ -493,8 +484,9 @@ def process_report(task_id, selected_year, selected_statuses):
             # Add title row with academic year
             worksheet['B1'] = f"Title of Academic Year {year_display}"
             title_cell = worksheet['B1']
-            title_cell.font = title_cell.font.copy(bold=True, size=14)
+            title_cell.font = title_cell.font.copy(bold=True)
             title_cell.fill = openpyxl.styles.PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+            title_cell.alignment = openpyxl.styles.Alignment(horizontal='left', vertical='center')
             
             # Bold headers (now in row 2)
             for cell in worksheet[2]:
