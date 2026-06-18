@@ -289,10 +289,15 @@ def index():
     
     years = list(range(current_year - 2, current_year + 6))
     
+    # Fetch properties for dropdown
+    properties = get_all_properties()
+    properties_sorted = sorted(properties, key=lambda x: x.get('MarketingName', ''))
+    
     response = make_response(render_template('index.html', 
                          years=years, 
                          statuses=LEASE_STATUSES,
-                         current_year=current_year))
+                         current_year=current_year,
+                         properties=properties_sorted))
     
     # Prevent caching
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
@@ -302,12 +307,36 @@ def index():
     return response
 
 
+@app.route('/get_properties')
+def get_properties_list():
+    """Return list of all properties as JSON for property selector"""
+    properties = get_all_properties()
+    property_list = [{
+        'id': prop.get('PropertyID', ''),
+        'name': prop.get('MarketingName', 'Unknown')
+    } for prop in properties]
+    
+    # Sort by name
+    property_list.sort(key=lambda x: x['name'])
+    
+    return jsonify({'properties': property_list})
+
+
 @app.route('/run_report', methods=['POST'])
 def run_report():
     """Run the report with selected parameters and return task ID"""
     data = request.get_json()
     selected_year = data.get('year')
     selected_statuses = data.get('statuses', [])
+    selected_properties_raw = data.get('properties', ['all'])
+    
+    # Normalize selected_properties to either ['all'] or list of integers
+    # JavaScript sends either ['all'] or ['propertyID']
+    if selected_properties_raw == ['all']:
+        selected_properties = ['all']
+    else:
+        # Convert property IDs to integers
+        selected_properties = [int(pid) for pid in selected_properties_raw if pid != 'all']
     
     if not selected_year or not selected_statuses:
         return jsonify({'error': 'Please select a year and at least one status'}), 400
@@ -325,14 +354,14 @@ def run_report():
     }
     
     # Start background thread to process report
-    thread = threading.Thread(target=process_report, args=(task_id, selected_year, selected_statuses))
+    thread = threading.Thread(target=process_report, args=(task_id, selected_year, selected_statuses, selected_properties))
     thread.daemon = True
     thread.start()
     
     return jsonify({'task_id': task_id})
 
 
-def process_report(task_id, selected_year, selected_statuses):
+def process_report(task_id, selected_year, selected_statuses, selected_properties=['all']):
     """Process the report in background and track progress"""
     try:
         report_start_time = datetime.now()
@@ -355,6 +384,11 @@ def process_report(task_id, selected_year, selected_statuses):
         properties = get_all_properties()
         prop_elapsed = (datetime.now() - prop_start).total_seconds()
         print(f"✓ Retrieved {len(properties)} properties ({prop_elapsed:.2f} seconds)")
+        
+        # Filter properties if specific ones are selected
+        if selected_properties != ['all']:
+            properties = [p for p in properties if p.get('PropertyID') in selected_properties]
+            print(f"✓ Filtered to {len(properties)} selected properties")
         
         if not properties:
             progress_data[task_id]['status'] = 'error'
