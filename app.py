@@ -158,14 +158,13 @@ _ENTRATA_CAP = 500  # Entrata's hard per-request record limit
 
 
 def _query_ids_in_range(headers, property_id, date_from, date_to, status_ids):
-    """Query lease IDs for a property that overlap with the academic year period.
-    A lease overlaps if it starts before/during the period AND ends after/during the period.
+    """Query lease IDs for a property within a moveInDate range.
     Returns a list of ID strings, or None on API error."""
     params = {
         "propertyId": str(property_id),
         "leaseStatusTypeIds": status_ids,
-        "moveInDateTo": date_to.strftime("%m/%d/%Y"),      # Lease started before/during period end
-        "moveOutDateFrom": date_from.strftime("%m/%d/%Y"),  # Lease ends after/during period start
+        "moveInDateFrom": date_from.strftime("%m/%d/%Y"),
+        "moveInDateTo": date_to.strftime("%m/%d/%Y"),
     }
     payload = {
         "auth": {"type": "apikey"},
